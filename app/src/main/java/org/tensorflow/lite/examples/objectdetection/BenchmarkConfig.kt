@@ -2,7 +2,7 @@ package org.tensorflow.lite.examples.objectdetection
 
 // Defines the strictly reproducible parameters for a benchmark run
 data class BenchmarkConfig(
-    val modelName: String = "yolov11n_float16.tflite",
+    val modelName: String = "yolov11n_int8.tflite",
     val delegate: String = "GPU", // Options: CPU, GPU, NNAPI
     val numThreads: Int = 4,
     val warmupIterations: Int = 10, // Crucial for stabilizing thermal loads
