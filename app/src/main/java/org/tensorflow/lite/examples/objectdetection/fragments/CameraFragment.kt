@@ -112,9 +112,12 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
             )
             
             // TODO: Load the actual TFLite model ByteBuffer from the assets folder here
-            val dummyBuffer = java.nio.ByteBuffer.allocateDirect(0) 
-            
-            orchestrator.runBenchmark(config, dummyBuffer)
+            try {
+    val modelBuffer = org.tensorflow.lite.examples.objectdetection.ModelLoader.loadModelFile(requireContext(), config.modelName)
+    orchestrator.runBenchmark(config, modelBuffer)
+} catch (e: Exception) {
+    android.util.Log.e("Benchmarker", "Failed to load model file from assets: ${e.message}")
+}
         }
         // -------------------------------------
 
