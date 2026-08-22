@@ -94,6 +94,29 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
     @SuppressLint("MissingPermission")
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        // --- JOSS BENCHMARK INITIALIZATION ---
+        val mainExecutor = androidx.core.content.ContextCompat.getMainExecutor(requireContext())
+        val engine = org.tensorflow.lite.examples.objectdetection.LiteRTEngine()
+        val telemetry = org.tensorflow.lite.examples.objectdetection.TelemetryCollector(requireContext(), mainExecutor)
+        val exporter = org.tensorflow.lite.examples.objectdetection.MetricsExporter(requireContext())
+        val orchestrator = org.tensorflow.lite.examples.objectdetection.BenchmarkOrchestrator(requireContext(), engine, telemetry, exporter)
+
+        // Listen for the benchmark button click
+        fragmentCameraBinding.btnRunBenchmark.setOnClickListener {
+            android.util.Log.i("Benchmarker", "Benchmark button clicked! Triggering orchestrator...")
+            
+            // Generate standard config
+            val config = org.tensorflow.lite.examples.objectdetection.BenchmarkConfig(
+                modelName = "yolov11n_float16.tflite",
+                delegate = "GPU"
+            )
+            
+            // TODO: Load the actual TFLite model ByteBuffer from the assets folder here
+            val dummyBuffer = java.nio.ByteBuffer.allocateDirect(0) 
+            
+            orchestrator.runBenchmark(config, dummyBuffer)
+        }
+        // -------------------------------------
 
         objectDetectorHelper = ObjectDetectorHelper(
             context = requireContext(),
