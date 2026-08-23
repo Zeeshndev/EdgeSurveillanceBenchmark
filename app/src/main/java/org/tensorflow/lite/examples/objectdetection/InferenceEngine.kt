@@ -1,10 +1,11 @@
 package org.tensorflow.lite.examples.objectdetection
 
 import android.util.Log
-import com.google.ai.edge.litert.Interpreter
-import com.google.ai.edge.litert.gpu.CompatibilityList
-import com.google.ai.edge.litert.gpu.GpuDelegate
+import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.gpu.CompatibilityList
+import org.tensorflow.lite.gpu.GpuDelegate
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 // Generalized interface to support multiple backends for JOSS compliance
 interface InferenceEngine {
@@ -15,6 +16,8 @@ interface InferenceEngine {
 
 class LiteRTEngine : InferenceEngine {
     private var interpreter: Interpreter? = null
+    private var inputBuffers = arrayOf<Any>()
+    private var outputBuffers = mutableMapOf<Int, Any>()
 
     override fun loadModel(modelBuffer: ByteBuffer, delegateChoice: String) {
         val options = Interpreter.Options()
@@ -26,7 +29,7 @@ class LiteRTEngine : InferenceEngine {
                         options.addDelegate(GpuDelegate(compatList.bestOptionsForThisDevice))
                         Log.i("Benchmarker", "GPU Delegate attached successfully.")
                     } else {
-                        Log.w("Benchmarker", "GPU_UNSUPPORTED. Falling back to CPU (4 threads).")
+                        Log.w("Benchmarker", "GPU_UNSUPPORTED. Falling back to CPU.")
                         options.setNumThreads(4)
                     }
                 }
@@ -41,19 +44,54 @@ class LiteRTEngine : InferenceEngine {
             }
             interpreter = Interpreter(modelBuffer, options)
             
+            // CRITICAL: Force memory allocation before querying tensor sizes
+            interpreter!!.allocateTensors()
+
+            // Dynamically support models with ANY number of inputs
+            val inputs = mutableListOf<ByteBuffer>()
+            for (i in 0 until interpreter!!.inputTensorCount) {
+                val tensor = interpreter!!.getInputTensor(i)
+                inputs.add(ByteBuffer.allocateDirect(tensor.numBytes()).order(ByteOrder.nativeOrder()))
+            }
+            inputBuffers = inputs.toTypedArray()
+
+            // Dynamically support models with ANY number of outputs (YOLO standard)
+            for (i in 0 until interpreter!!.outputTensorCount) {
+                val tensor = interpreter!!.getOutputTensor(i)
+                outputBuffers[i] = ByteBuffer.allocateDirect(tensor.numBytes()).order(ByteOrder.nativeOrder())
+            }
+            
         } catch (e: Exception) {
-            // CRITICAL: Gracefully captures the YOLOv11n GPU delegate crash for your TMLR paper
             Log.e("Benchmarker", "DELEGATE_INIT_FAILURE: $delegateChoice, ${e.stackTraceToString()}")
             throw e 
         }
     }
 
     override fun warmup(iterations: Int) {
-        // Implementation coming next
+        if (interpreter == null) return
+        
+        for (i in 0 until iterations) {
+            prepareBuffers()
+            // runForMultipleInputsOutputs safely handles multi-tensor YOLO architectures
+            interpreter!!.runForMultipleInputsOutputs(inputBuffers, outputBuffers)
+        }
     }
 
     override fun runInference(frame: Any): Long {
-        // Implementation coming next
-        return 0L
+        if (interpreter == null) return 0L
+        
+        prepareBuffers()
+
+        val startTime = System.nanoTime()
+        interpreter!!.runForMultipleInputsOutputs(inputBuffers, outputBuffers)
+        val endTime = System.nanoTime()
+
+        return (endTime - startTime) / 1_000_000 
+    }
+
+    private fun prepareBuffers() {
+        // TFLite consumes buffers; use clear() to reset position to 0 before every single frame
+        inputBuffers.forEach { (it as ByteBuffer).clear() }
+        outputBuffers.values.forEach { (it as ByteBuffer).clear() }
     }
 }
