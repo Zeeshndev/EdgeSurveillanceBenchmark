@@ -1,0 +1,2 @@
+Model,Delegate,Threads,Warmup,Inference,AvgLatencyMs,PeakMemKb,BatteryMicroAmps,ThermalThrottling,Crash,Error
+efficientdet-lite0.tflite,GPU,4,10,100,286.03,0,0,false,false,None
