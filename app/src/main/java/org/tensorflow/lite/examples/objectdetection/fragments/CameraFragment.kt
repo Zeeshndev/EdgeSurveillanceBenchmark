@@ -107,8 +107,7 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
             
             // Generate standard config
             val config = org.tensorflow.lite.examples.objectdetection.BenchmarkConfig(
-                modelName = "yolov11n_float16.tflite",
-                delegate = "GPU"
+    modelName = "efficientdet-lite0.tflite", // Bypassing the YOLO export bug for tonight                delegate = "CPU"
             )
             
             // TODO: Load the actual TFLite model ByteBuffer from the assets folder here
