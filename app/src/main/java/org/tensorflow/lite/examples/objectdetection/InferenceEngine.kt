@@ -84,7 +84,7 @@ class LiteRTEngine : InferenceEngine {
 
         val startTime = System.nanoTime()
         interpreter!!.runForMultipleInputsOutputs(inputBuffers, outputBuffers)
-        // Sanity check: Grab the first float from the first output tensor
+        // Sanity check: Read the first float from the first output tensor
 val firstOutputBuffer = outputBuffers[0] as ByteBuffer
 val firstValue = firstOutputBuffer.getFloat(0) 
 Log.d("Telemetry", "Output Sanity Check - Tensor 0, Index 0: $firstValue")
