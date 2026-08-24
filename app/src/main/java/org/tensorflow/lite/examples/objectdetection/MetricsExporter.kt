@@ -3,7 +3,6 @@ package org.tensorflow.lite.examples.objectdetection
 import android.content.Context
 import android.util.Log
 import java.io.File
-import java.io.FileWriter
 import java.io.IOException
 
 class MetricsExporter(private val context: Context) {
@@ -13,25 +12,26 @@ class MetricsExporter(private val context: Context) {
         val isNewFile = !file.exists()
 
         try {
-            FileWriter(file, true).use { writer ->
-                // Write standard CSV header if it is a brand new file
-                if (isNewFile) {
-                    writer.append("Model,Delegate,Threads,Warmup,Inference,AvgLatencyMs,PeakMemKb,BatteryMicroAmps,ThermalThrottling,Crash,Error\n")
-                }
-                
-                // Append the benchmark data row
-                writer.append("${result.config.modelName},")
-                writer.append("${result.config.delegate},")
-                writer.append("${result.config.numThreads},")
-                writer.append("${result.config.warmupIterations},")
-                writer.append("${result.config.inferenceIterations},")
-                writer.append("${result.averageLatencyMs},")
-                writer.append("${result.peakMemoryPssKb},")
-                writer.append("${result.batteryDrainMicroAmps},")
-                writer.append("${result.thermalThrottlingOccurred},")
-                writer.append("${result.gpuCrashCaptured},")
-                writer.append("${result.errorMessage ?: "None"}\n")
+            // Write standard CSV header if it is a brand new file
+            if (isNewFile) {
+                file.appendText("Model,Delegate,Threads,Warmup,Inference,AvgLatencyMs,PeakMemKb,BatteryMicroAmps,ThermalThrottling,Crash,Error\n")
             }
+            
+            // Build and append the benchmark summary data row
+            val csvRow = "${result.config.modelName}," +
+                    "${result.config.delegate}," +
+                    "${result.config.numThreads}," +
+                    "${result.config.warmupIterations}," +
+                    "${result.config.inferenceIterations}," +
+                    "${result.averageLatencyMs}," +
+                    "${result.peakMemoryPssKb}," +
+                    "${result.batteryDrainMicroAmps}," +
+                    "${result.thermalThrottlingOccurred}," +
+                    "${result.gpuCrashCaptured}," +
+                    "${result.errorMessage ?: "None"}\n"
+            
+            file.appendText(csvRow)
+            
             Log.i("MetricsExporter", "Results successfully appended to ${file.absolutePath}")
         } catch (e: IOException) {
             Log.e("MetricsExporter", "Failed to write CSV results: ${e.message}")

@@ -15,8 +15,62 @@ class BenchmarkOrchestrator(
     // Dedicated background thread to ensure UI rendering doesn't interfere with CPU/GPU timing
     private val benchmarkExecutor: Executor = Executors.newSingleThreadExecutor()
 
+    private fun enforcePreTrialGate(context: Context): Boolean {
+        // Register receiver to get live battery metrics
+        val batteryStatus: android.content.Intent? = android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED).let { ifilter ->
+            context.registerReceiver(null, ifilter)
+        }
+        
+        // 1. Calculate State of Charge (SoC)
+        val level: Int = batteryStatus?.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale: Int = batteryStatus?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val batteryPct = if (scale > 0) level * 100 / scale.toFloat() else -1f
+        
+        // 2. Check Power State (Must be DISCHARGING)
+        val status: Int = batteryStatus?.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) ?: -1
+        val isDischarging = status == android.os.BatteryManager.BATTERY_STATUS_DISCHARGING || status == android.os.BatteryManager.BATTERY_STATUS_NOT_CHARGING
+        
+        // 3. Numeric Temperature (°C)
+        val tempInt = batteryStatus?.getIntExtra(android.os.BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0
+        val tempCelsius = tempInt / 10.0f
+        
+        // 4. Hardware Thermal Enum
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        val thermalStatus = powerManager.currentThermalStatus
+
+        var gatePassed = true
+
+        // --- GATE EVALUATIONS ---
+        if (batteryPct !in 85.0..95.0) {
+            android.util.Log.e("Orchestrator", "GATE FAILED: Battery at ${batteryPct}%. Must be between 85-95%.")
+            gatePassed = false
+        }
+        if (!isDischarging) {
+            android.util.Log.e("Orchestrator", "GATE FAILED: Device is charging. Unplug to start trial.")
+            gatePassed = false
+        }
+        if (thermalStatus > android.os.PowerManager.THERMAL_STATUS_LIGHT) {
+            android.util.Log.e("Orchestrator", "GATE FAILED: OS Thermal Status too high ($thermalStatus).")
+            gatePassed = false
+        }
+
+        if (gatePassed) {
+            android.util.Log.i("Orchestrator", "GATE PASSED: Battery ${batteryPct}%, Temp: ${tempCelsius}°C, Discharging, Thermal Enum: $thermalStatus")
+        } else {
+            android.util.Log.e("Orchestrator", "CURRENT TEMP: ${tempCelsius}°C. Please wait for cooldown or correct conditions.")
+        }
+        
+        return gatePassed
+    }
+
     fun runBenchmark(config: BenchmarkConfig, modelBuffer: ByteBuffer) {
         benchmarkExecutor.execute {
+            // ---> THE NEW PRE-TRIAL GATE <---
+            if (!enforcePreTrialGate(context)) {
+                Log.e("Orchestrator", "TRIAL ABORTED: Experimental controls violated. See anomaly log.")
+                return@execute
+            }
+
             Log.i("Orchestrator", "INIT: Starting benchmark for ${config.modelName} on ${config.delegate}")
             
             var crashCaptured = false
