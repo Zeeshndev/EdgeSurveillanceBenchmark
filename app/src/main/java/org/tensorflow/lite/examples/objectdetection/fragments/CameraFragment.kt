@@ -107,8 +107,10 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
             
             // Generate standard config
             val config = org.tensorflow.lite.examples.objectdetection.BenchmarkConfig(
-            modelName = "yolo11n_int8.tflite",
-    delegate = "NNAPI"
+            // modelName = "yolo11n.tflite",
+            modelName = "mobilenet_v1_1.0_224_quant.tflite",
+            delegate = "CPU" // Use CPU first for the cleanest baseline test
+            // delegate = "NNAPI" // or "CPU"
             )
             
             // TODO: Load the actual TFLite model ByteBuffer from the assets folder here
