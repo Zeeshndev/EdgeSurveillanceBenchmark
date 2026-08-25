@@ -87,59 +87,44 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
       savedInstanceState: Bundle?
     ): View {
         _fragmentCameraBinding = FragmentCameraBinding.inflate(inflater, container, false)
-
         return fragmentCameraBinding.root
     }
 
     @SuppressLint("MissingPermission")
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-        // --- JOSS BENCHMARK INITIALIZATION ---
-        val mainExecutor = androidx.core.content.ContextCompat.getMainExecutor(requireContext())
-        val engine = org.tensorflow.lite.examples.objectdetection.LiteRTEngine()
-        val telemetry = org.tensorflow.lite.examples.objectdetection.TelemetryCollector(requireContext(), mainExecutor)
-        val exporter = org.tensorflow.lite.examples.objectdetection.MetricsExporter(requireContext())
-        val orchestrator = org.tensorflow.lite.examples.objectdetection.BenchmarkOrchestrator(requireContext(), engine, telemetry, exporter)
+
+        // Initialize the object detector FIRST so it is ready for the orchestrator
+        objectDetectorHelper = ObjectDetectorHelper(
+            context = requireContext(),
+            objectDetectorListener = this
+        )
 
         // Listen for the benchmark button click
         fragmentCameraBinding.btnRunBenchmark.setOnClickListener {
-            android.util.Log.i("Benchmarker", "Benchmark button clicked! Triggering orchestrator...")
-            
-            // Generate standard config
-            val config = org.tensorflow.lite.examples.objectdetection.BenchmarkConfig(
-            // modelName = "yolo11n.tflite",
-            // modelName = "mobilenet_v1_1.0_224_quant.tflite",
-            modelName = "yolov10n_int8.tflite",
+            // SHUT OFF THE LIVE CAMERA TO PREVENT CRASHES
+            cameraProvider?.unbindAll()
 
-            delegate = "CPU" // Use CPU first for the cleanest baseline test
-            // delegate = "NNAPI" // or "CPU"
+            val config = org.tensorflow.lite.examples.objectdetection.BenchmarkConfig(
+                modelName = "yolo11n.tflite",
+                delegate = "CPU"
+            )
+
+            val orchestrator = org.tensorflow.lite.examples.objectdetection.BenchmarkOrchestrator(
+                requireContext(), 
+                objectDetectorHelper
             )
             
-            // TODO: Load the actual TFLite model ByteBuffer from the assets folder here
-            try {
-    val modelBuffer = org.tensorflow.lite.examples.objectdetection.ModelLoader.loadModelFile(requireContext(), config.modelName)
-    orchestrator.runBenchmark(config, modelBuffer)
-} catch (e: Exception) {
-    android.util.Log.e("Benchmarker", "Failed to load model file from assets: ${e.message}")
-}
+            orchestrator.runBenchmark(config)
         }
-        // -------------------------------------
-
-        objectDetectorHelper = ObjectDetectorHelper(
-            context = requireContext(),
-            objectDetectorListener = this)
 
         // Initialize our background executor
         cameraExecutor = Executors.newSingleThreadExecutor()
 
         // Wait for the views to be properly laid out
         fragmentCameraBinding.viewFinder.post {
-            // Set up the camera and its use cases
             setUpCamera()
         }
-
-        // Attach listeners to UI control widgets
-        initBottomSheetControls()
     }
 
     private fun initBottomSheetControls() {
