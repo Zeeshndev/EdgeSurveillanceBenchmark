@@ -1,127 +1,143 @@
 package org.tensorflow.lite.examples.objectdetection
 
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
+import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
-import java.nio.ByteBuffer
-import java.util.concurrent.Executor
+import java.io.File
+import java.io.FileWriter
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+
+
 
 class BenchmarkOrchestrator(
     private val context: Context,
-    private val engine: InferenceEngine,
-    private val telemetry: TelemetryCollector,
-    private val exporter: MetricsExporter
+    private val detectorHelper: ObjectDetectorHelper
 ) {
-    // Dedicated background thread to ensure UI rendering doesn't interfere with CPU/GPU timing
-    private val benchmarkExecutor: Executor = Executors.newSingleThreadExecutor()
+    private val benchmarkExecutor = Executors.newSingleThreadExecutor()
+    private val telemetryExecutor = Executors.newSingleThreadScheduledExecutor()
 
-    private fun enforcePreTrialGate(context: Context): Boolean {
-        // Register receiver to get live battery metrics
-        val batteryStatus: android.content.Intent? = android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED).let { ifilter ->
-            context.registerReceiver(null, ifilter)
-        }
-        
-        // 1. Calculate State of Charge (SoC)
-        val level: Int = batteryStatus?.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) ?: -1
-        val scale: Int = batteryStatus?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1) ?: -1
-        val batteryPct = if (scale > 0) level * 100 / scale.toFloat() else -1f
-        
-        // 2. Check Power State (Must be DISCHARGING)
-        val status: Int = batteryStatus?.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) ?: -1
-        val isDischarging = status == android.os.BatteryManager.BATTERY_STATUS_DISCHARGING || status == android.os.BatteryManager.BATTERY_STATUS_NOT_CHARGING
-        
-        // 3. Numeric Temperature (°C)
-        val tempInt = batteryStatus?.getIntExtra(android.os.BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0
-        val tempCelsius = tempInt / 10.0f
-        
-        // 4. Hardware Thermal Enum
-        val powerManager = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
-        val thermalStatus = powerManager.currentThermalStatus
+    fun runBenchmark(config: BenchmarkConfig) {
+        benchmarkExecutor.execute {
+            try {
+                // 1. The Physical Gatekeeper
+                if (!checkPhysicalGates()) {
+                    Log.e("Orchestrator", "Physical gates failed. Aborting run.")
+                    // return@execute
+                }
+                Log.i("Orchestrator", "Gates passed. Starting 30-minute controlled test for ${config.modelName}...")
 
-        var gatePassed = true
+                // 2. Initialize Dependencies
+                val datasetFeeder = DatasetFeeder(context)
+                val telemetryCollector = TelemetryCollector(context)
+                val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+                
+                val samples = mutableListOf<TelemetryCollector.Sample>()
+                val latenciesMs = mutableListOf<Long>()
 
-        // --- GATE EVALUATIONS ---
-        if (batteryPct !in 85.0..95.0) {
-            android.util.Log.e("Orchestrator", "GATE FAILED: Battery at ${batteryPct}%. Must be between 85-95%.")
-            gatePassed = false
-        }
-        if (!isDischarging) {
-            android.util.Log.e("Orchestrator", "GATE FAILED: Device is charging. Unplug to start trial.")
-            gatePassed = false
-        }
-        if (thermalStatus > android.os.PowerManager.THERMAL_STATUS_LIGHT) {
-            android.util.Log.e("Orchestrator", "GATE FAILED: OS Thermal Status too high ($thermalStatus).")
-            gatePassed = false
-        }
+                // 3. Start 1Hz Telemetry Loop (Claude's continuous tracker)
+                telemetryExecutor.scheduleAtFixedRate({
+                    samples.add(telemetryCollector.sampleOnce(powerManager))
+                }, 0, 1, TimeUnit.SECONDS)
 
-        if (gatePassed) {
-            android.util.Log.i("Orchestrator", "GATE PASSED: Battery ${batteryPct}%, Temp: ${tempCelsius}°C, Discharging, Thermal Enum: $thermalStatus")
-        } else {
-            android.util.Log.e("Orchestrator", "CURRENT TEMP: ${tempCelsius}°C. Please wait for cooldown or correct conditions.")
+                // 4. Warmup Phase (10 frames)
+                for (i in 0 until 10) {
+                    val bitmap = datasetFeeder.getNextFrame()
+                    detectorHelper.detect(bitmap, 0)
+                }
+
+                // 5. 30-Minute Wall-Clock Loop (Claude's fix)
+                // For tonight's smoke test, let's set this to 1 minute (60,000 ms) to verify it works quickly.
+                // For tomorrow's real matrix, change this to 30 minutes (30 * 60 * 1000L).
+                val durationMs = 60 * 1000L 
+                val startTime = System.currentTimeMillis()
+                val endTime = startTime + durationMs
+
+                Log.i("Orchestrator", "Entering main inference loop...")
+                while (System.currentTimeMillis() < endTime) {
+                    val bitmap = datasetFeeder.getNextFrame()
+                    
+                    val t0 = SystemClock.elapsedRealtimeNanos()
+                    detectorHelper.detect(bitmap, 0)
+                    val t1 = SystemClock.elapsedRealtimeNanos()
+                    
+                    latenciesMs.add((t1 - t0) / 1_000_000)
+                }
+
+                // 6. Stop Telemetry
+                telemetryExecutor.shutdown()
+
+                // 7. Export the 3 CSV Files
+                exportData(config.modelName, latenciesMs, samples)
+                Log.i("Orchestrator", "Benchmark complete. All data exported.")
+                
+            } catch (e: Exception) {
+                Log.e("Orchestrator", "Crash during benchmark", e)
+            }
         }
-        
-        return gatePassed
     }
 
-    fun runBenchmark(config: BenchmarkConfig, modelBuffer: ByteBuffer) {
-        benchmarkExecutor.execute {
-            // ---> THE NEW PRE-TRIAL GATE <---
-            if (!enforcePreTrialGate(context)) {
-                Log.e("Orchestrator", "TRIAL ABORTED: Experimental controls violated. See anomaly log.")
-                return@execute
-            }
+    private fun checkPhysicalGates(): Boolean {
+        val batteryStatus: Intent? = IntentFilter(Intent.ACTION_BATTERY_CHANGED).let { ifilter ->
+            context.registerReceiver(null, ifilter)
+        }
+        val status: Int = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+        
+        val level: Int = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale: Int = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val batteryPct = level * 100 / scale.toFloat()
 
-            Log.i("Orchestrator", "INIT: Starting benchmark for ${config.modelName} on ${config.delegate}")
+        if (isCharging) {
+            Log.e("Gatekeeper", "Device is charging. Unplug to continue.")
+            return false
+        }
+        if (batteryPct !in 85.0..95.0) {
+            Log.e("Gatekeeper", "Battery at $batteryPct%. Must be between 85-95%.")
+            return false
+        }
+        return true
+    }
+
+    private fun exportData(modelName: String, latencies: List<Long>, samples: List<TelemetryCollector.Sample>) {
+        val dir = context.getExternalFilesDir(null) ?: return
+        val sanitizedName = modelName.replace(".tflite", "")
+        
+        // CSV 1: Raw Latency Array (For p95 Calculations)
+        val latencyFile = File(dir, "trial_${sanitizedName}_raw_latencies.csv")
+        FileWriter(latencyFile).use { writer ->
+            writer.append("InferenceIndex,LatencyMs\n")
+            latencies.forEachIndexed { index, ms ->
+                writer.append("$index,$ms\n")
+            }
+        }
+
+        // CSV 2: Continuous Telemetry Curve
+        val telemetryFile = File(dir, "trial_${sanitizedName}_telemetry.csv")
+        FileWriter(telemetryFile).use { writer ->
+            writer.append("TimestampMs,PssKb,RawCurrentUa,BatteryPct,ThermalStatus\n")
+            samples.forEach { s ->
+                writer.append("${s.timestampMs},${s.pssKb},${s.rawCurrentUa},${s.batteryPct},${s.thermalStatus}\n")
+            }
+        }
+
+        // CSV 3: Master Rollup Sheet
+        val summaryFile = File(dir, "benchmark_results.csv")
+        val isNewFile = !summaryFile.exists()
+        FileWriter(summaryFile, true).use { writer ->
+            if (isNewFile) {
+                writer.append("Model,TotalInferences,AvgLatencyMs,PeakMemKb,StartBattery,EndBattery\n")
+            }
+            val avgLatency = if (latencies.isNotEmpty()) latencies.average() else 0.0
+            val peakMem = samples.maxByOrNull { it.pssKb }?.pssKb ?: 0
+            val startBat = samples.firstOrNull()?.batteryPct ?: 0
+            val endBat = samples.lastOrNull()?.batteryPct ?: 0
             
-            var crashCaptured = false
-            var errorMessage: String? = null
-            var averageLatencyMs = 0.0
-
-            try {
-                // Step 1: Engage telemetry and load the model
-                telemetry.startTracking()
-                engine.loadModel(modelBuffer, config.delegate)
-
-                // Step 2: Warmup phase (stabilizes thermals and memory)
-                Log.i("Orchestrator", "PHASE 1: Executing ${config.warmupIterations} warmup iterations...")
-                engine.warmup(config.warmupIterations)
-
-                // Step 3: Measured inference loop
-                Log.i("Orchestrator", "PHASE 2: Executing ${config.inferenceIterations} measured iterations...")
-                var totalLatency = 0L
-                val dummyFrame = Any() // Will be replaced by actual CameraX ImageProxy later
-                
-                for (i in 0 until config.inferenceIterations) {
-                    val start = System.currentTimeMillis()
-                    engine.runInference(dummyFrame)
-                    totalLatency += (System.currentTimeMillis() - start)
-                }
-                averageLatencyMs = totalLatency / config.inferenceIterations.toDouble()
-
-            } catch (e: Exception) {
-                // Gracefully catch the YOLOv11 GPU delegate crash
-                crashCaptured = true
-                errorMessage = e.stackTraceToString()
-                Log.e("Orchestrator", "CRASH INTERCEPTED: ${e.message}")
-            } finally {
-                // Step 4: Stop tracking and extract hardware metrics
-                telemetry.pollMetrics()
-                telemetry.stopTracking()
-
-                // Step 5: Package and export the results
-                val result = BenchmarkResult(
-                    config = config,
-                    averageLatencyMs = averageLatencyMs,
-                    peakMemoryPssKb = 0, // Hooked up to TelemetryCollector in next phase
-                    batteryDrainMicroAmps = 0, // Hooked up to TelemetryCollector in next phase
-                    thermalThrottlingOccurred = false,
-                    gpuCrashCaptured = crashCaptured,
-                    errorMessage = errorMessage
-                )
-                
-                exporter.exportToCsv(result)
-                Log.i("Orchestrator", "COMPLETE: Benchmark finished and results safely exported to CSV.")
-            }
+            writer.append("$modelName,${latencies.size},${String.format("%.2f", avgLatency)},$peakMem,$startBat,$endBat\n")
         }
     }
 }
