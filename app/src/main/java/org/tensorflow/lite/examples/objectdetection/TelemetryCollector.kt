@@ -1,41 +1,32 @@
 package org.tensorflow.lite.examples.objectdetection
 
+import android.app.ActivityManager
 import android.content.Context
 import android.os.BatteryManager
-import android.os.Debug
 import android.os.PowerManager
-import android.util.Log
-import java.util.concurrent.Executor
+import android.os.Process
 
-class TelemetryCollector(private val context: Context, private val mainExecutor: Executor) {
+class TelemetryCollector(private val context: Context) {
+    private val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
     private val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-    private val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-    
-    // Event-driven thermal logging (API 29+)
-    private val thermalListener = PowerManager.OnThermalStatusChangedListener { status ->
-        Log.i("Telemetry", "THERMAL_STATUS_CHANGED: \$status")
-    }
+    private val myPid = Process.myPid()
 
-    fun startTracking() {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-            powerManager.addThermalStatusListener(mainExecutor, thermalListener)
-        }
-    }
+    data class Sample(
+        val timestampMs: Long,
+        val pssKb: Int,
+        val rawCurrentUa: Int,
+        val batteryPct: Int,
+        val thermalStatus: Int
+    )
 
-    fun pollMetrics() {
-        // Low-frequency polling to avoid observation bias
-        val currentMicroAmps = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
-        
-        val memInfo = Debug.MemoryInfo()
-        Debug.getMemoryInfo(memInfo)
-        val physicalMemoryKB = memInfo.totalPss
-        
-        Log.i("Telemetry", "Battery µA: \$currentMicroAmps | Mem PSS KB: \$physicalMemoryKB")
-    }
-
-    fun stopTracking() {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-            powerManager.removeThermalStatusListener(thermalListener)
-        }
+    fun sampleOnce(powerManager: PowerManager): Sample {
+        val memInfo = activityManager.getProcessMemoryInfo(intArrayOf(myPid))[0]
+        return Sample(
+            timestampMs = System.currentTimeMillis(),
+            pssKb = memInfo.totalPss,
+            rawCurrentUa = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW),
+            batteryPct = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY),
+            thermalStatus = powerManager.currentThermalStatus
+        )
     }
 }
