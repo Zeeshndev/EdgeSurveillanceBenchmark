@@ -27,7 +27,7 @@ class BenchmarkOrchestrator(
                 // 1. The Physical Gatekeeper
                 if (!checkPhysicalGates()) {
                     Log.e("Orchestrator", "Physical gates failed. Aborting run.")
-                    // return@execute
+                    return@execute
                 }
                 Log.i("Orchestrator", "Gates passed. Starting 30-minute controlled test for ${config.modelName}...")
 
@@ -53,7 +53,7 @@ class BenchmarkOrchestrator(
                 // 5. 30-Minute Wall-Clock Loop (Claude's fix)
                 // For tonight's smoke test, let's set this to 1 minute (60,000 ms) to verify it works quickly.
                 // For tomorrow's real matrix, change this to 30 minutes (30 * 60 * 1000L).
-                val durationMs = 60 * 1000L 
+                val durationMs = 30 * 60 * 1000L 
                 val startTime = System.currentTimeMillis()
                 val endTime = startTime + durationMs
 

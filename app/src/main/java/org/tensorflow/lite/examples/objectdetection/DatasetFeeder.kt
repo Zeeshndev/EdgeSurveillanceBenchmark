@@ -11,7 +11,7 @@ class DatasetFeeder(private val context: Context, private val datasetFolder: Str
     init {
         // Fetch only .jpg files and limit to 5 frames to conserve RAM
         val allFiles = context.assets.list(datasetFolder)?.toList() ?: emptyList()
-        val imageFiles = allFiles.filter { it.endsWith(".jpg", ignoreCase = true) }.take(5)
+        val imageFiles = allFiles.filter { it.endsWith(".jpg", ignoreCase = true) }.take(50)
         
         require(imageFiles.isNotEmpty()) { "No .jpg files found!" }
 
