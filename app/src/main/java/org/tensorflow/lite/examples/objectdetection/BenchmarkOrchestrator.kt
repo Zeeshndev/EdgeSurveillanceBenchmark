@@ -1,5 +1,6 @@
 package org.tensorflow.lite.examples.objectdetection
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -9,10 +10,9 @@ import android.os.SystemClock
 import android.util.Log
 import java.io.File
 import java.io.FileWriter
+import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-
-
 
 class BenchmarkOrchestrator(
     private val context: Context,
@@ -20,7 +20,9 @@ class BenchmarkOrchestrator(
 ) {
     private val benchmarkExecutor = Executors.newSingleThreadExecutor()
     private val telemetryExecutor = Executors.newSingleThreadScheduledExecutor()
+    private val metricsExporter = MetricsExporter(context)
 
+    @SuppressLint("WakelockTimeout")
     fun runBenchmark(config: BenchmarkConfig) {
         benchmarkExecutor.execute {
             try {
@@ -29,17 +31,21 @@ class BenchmarkOrchestrator(
                     Log.e("Orchestrator", "Physical gates failed. Aborting run.")
                     return@execute
                 }
-                Log.i("Orchestrator", "Gates passed. Starting 30-minute controlled test for ${config.modelName}...")
+                Log.i("Orchestrator", "Gates passed. Starting controlled test for ${config.modelName}...")
 
                 // 2. Initialize Dependencies
                 val datasetFeeder = DatasetFeeder(context)
                 val telemetryCollector = TelemetryCollector(context)
                 val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-                
-                val samples = mutableListOf<TelemetryCollector.Sample>()
-                val latenciesMs = mutableListOf<Long>()
 
-                // 3. Start 1Hz Telemetry Loop (Claude's continuous tracker)
+                // 2.5 Acquire Programmatic OS WakeLock (Belt & Suspenders)
+                val wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "BenchmarkApp::InferenceLock")
+                wakeLock.acquire(40 * 60 * 1000L) // Force awake for up to 40 mins
+
+                val samples = mutableListOf<TelemetryCollector.Sample>()
+                val latenciesMs = mutableListOf<Double>()
+
+                // 3. Start 1Hz Telemetry Loop
                 telemetryExecutor.scheduleAtFixedRate({
                     samples.add(telemetryCollector.sampleOnce(powerManager))
                 }, 0, 1, TimeUnit.SECONDS)
@@ -50,31 +56,40 @@ class BenchmarkOrchestrator(
                     detectorHelper.detect(bitmap, 0)
                 }
 
-                // 5. 30-Minute Wall-Clock Loop (Claude's fix)
-                // For tonight's smoke test, let's set this to 1 minute (60,000 ms) to verify it works quickly.
-                // For tomorrow's real matrix, change this to 30 minutes (30 * 60 * 1000L).
-                val durationMs = 30 * 60 * 1000L 
+                // 5. Wall-Clock Benchmark Loop 
+                // Set to 10 minutes for validation run. (Change to 30 * 60 * 1000L for full trials)
+                val durationMs = 10 * 60 * 1000L
                 val startTime = System.currentTimeMillis()
                 val endTime = startTime + durationMs
 
                 Log.i("Orchestrator", "Entering main inference loop...")
+                var maxLatencyMs = 0.0
+
                 while (System.currentTimeMillis() < endTime) {
                     val bitmap = datasetFeeder.getNextFrame()
-                    
+
                     val t0 = SystemClock.elapsedRealtimeNanos()
                     detectorHelper.detect(bitmap, 0)
                     val t1 = SystemClock.elapsedRealtimeNanos()
-                    
-                    latenciesMs.add((t1 - t0) / 1_000_000)
+
+                    val latencyMs = (t1 - t0) / 1_000_000.0
+                    latenciesMs.add(latencyMs)
+
+                    if (latencyMs > maxLatencyMs) {
+                        maxLatencyMs = latencyMs
+                    }
                 }
 
-                // 6. Stop Telemetry
+                // 6. Stop Telemetry & Release WakeLock
                 telemetryExecutor.shutdown()
+                if (wakeLock.isHeld) {
+                    wakeLock.release()
+                }
 
                 // 7. Export the 3 CSV Files
-                exportData(config.modelName, latenciesMs, samples)
+                exportData(config, latenciesMs, samples, maxLatencyMs)
                 Log.i("Orchestrator", "Benchmark complete. All data exported.")
-                
+
             } catch (e: Exception) {
                 Log.e("Orchestrator", "Crash during benchmark", e)
             }
@@ -87,7 +102,7 @@ class BenchmarkOrchestrator(
         }
         val status: Int = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
         val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
-        
+
         val level: Int = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale: Int = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
         val batteryPct = level * 100 / scale.toFloat()
@@ -103,41 +118,80 @@ class BenchmarkOrchestrator(
         return true
     }
 
-    private fun exportData(modelName: String, latencies: List<Long>, samples: List<TelemetryCollector.Sample>) {
+    private fun exportData(
+        config: BenchmarkConfig,
+        latenciesMs: List<Double>,
+        samples: List<TelemetryCollector.Sample>,
+        maxLatencyMs: Double
+    ) {
         val dir = context.getExternalFilesDir(null) ?: return
-        val sanitizedName = modelName.replace(".tflite", "")
-        
-        // CSV 1: Raw Latency Array (For p95 Calculations)
+        val sanitizedName = config.modelName.replace(".tflite", "")
+
+        // CSV 1: Raw Latency Array
         val latencyFile = File(dir, "trial_${sanitizedName}_raw_latencies.csv")
         FileWriter(latencyFile).use { writer ->
             writer.append("InferenceIndex,LatencyMs\n")
-            latencies.forEachIndexed { index, ms ->
-                writer.append("$index,$ms\n")
+            latenciesMs.forEachIndexed { index, ms ->
+                writer.append(String.format(Locale.US, "%d,%.3f\n", index, ms))
             }
         }
 
         // CSV 2: Continuous Telemetry Curve
         val telemetryFile = File(dir, "trial_${sanitizedName}_telemetry.csv")
         FileWriter(telemetryFile).use { writer ->
-            writer.append("TimestampMs,PssKb,RawCurrentUa,BatteryPct,ThermalStatus\n")
+            writer.append("TimestampMs,PssKb,RawCurrentUa,BatteryPct,TemperatureC,ThermalStatus\n")
             samples.forEach { s ->
-                writer.append("${s.timestampMs},${s.pssKb},${s.rawCurrentUa},${s.batteryPct},${s.thermalStatus}\n")
+                writer.append(
+                    String.format(
+                        Locale.US,
+                        "%d,%d,%d,%d,%.1f,%d\n",
+                        s.timestampMs,
+                        s.pssKb,
+                        s.rawCurrentUa,
+                        s.batteryPct,
+                        s.temperatureC,
+                        s.thermalStatus
+                    )
+                )
             }
         }
 
-        // CSV 3: Master Rollup Sheet
-        val summaryFile = File(dir, "benchmark_results.csv")
-        val isNewFile = !summaryFile.exists()
-        FileWriter(summaryFile, true).use { writer ->
-            if (isNewFile) {
-                writer.append("Model,TotalInferences,AvgLatencyMs,PeakMemKb,StartBattery,EndBattery\n")
+        // CSV 3: Unified 13-Column Master Rollup Sheet
+        // Filter OS Interferences (Any latency > 500ms is an OS artifact, not AI compute)
+        val cleanLatencies = latenciesMs.filter { it <= 500.0 }
+        val osInterferences = latenciesMs.count { it > 500.0 }
+        
+        val avgLatency = if (cleanLatencies.isNotEmpty()) cleanLatencies.average() else 0.0
+        val medianLatency = if (cleanLatencies.isNotEmpty()) {
+            val sorted = cleanLatencies.sorted()
+            if (sorted.size % 2 == 0) {
+                (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) / 2.0
+            } else {
+                sorted[sorted.size / 2]
             }
-            val avgLatency = if (latencies.isNotEmpty()) latencies.average() else 0.0
-            val peakMem = samples.maxByOrNull { it.pssKb }?.pssKb ?: 0
-            val startBat = samples.firstOrNull()?.batteryPct ?: 0
-            val endBat = samples.lastOrNull()?.batteryPct ?: 0
-            
-            writer.append("$modelName,${latencies.size},${String.format("%.2f", avgLatency)},$peakMem,$startBat,$endBat\n")
-        }
+        } else 0.0
+
+        val peakMem = samples.maxByOrNull { it.pssKb }?.pssKb ?: 0
+        val startBat = samples.firstOrNull()?.batteryPct ?: 0
+        val endBat = samples.lastOrNull()?.batteryPct ?: 0
+        
+        val startTemp = samples.firstOrNull()?.temperatureC ?: 0.0
+        val maxTemp = samples.maxByOrNull { it.temperatureC }?.temperatureC ?: 0.0
+
+        metricsExporter.appendSummary(
+            modelName = config.modelName,
+            delegate = config.delegate,
+            threads = 4,
+            totalInferences = latenciesMs.size,
+            avgLatencyMs = avgLatency,
+            medianLatencyMs = medianLatency,
+            maxLatencyMs = maxLatencyMs,
+            osInterferences = osInterferences,
+            peakMemKb = peakMem,
+            startBattery = startBat,
+            endBattery = endBat,
+            startTempC = startTemp,
+            maxTempC = maxTemp
+        )
     }
 }
