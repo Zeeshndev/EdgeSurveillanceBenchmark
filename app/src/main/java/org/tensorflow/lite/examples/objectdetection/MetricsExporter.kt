@@ -10,7 +10,8 @@ import java.util.Locale
 class MetricsExporter(private val context: Context) {
 
     companion object {
-        const val CSV_HEADER = "Model,Delegate,Threads,TotalInferences,AvgLatencyMs,MedianLatencyMs,MaxLatencyMs,OsInterferences,PeakMemKb,BatteryPctStart,BatteryPctEnd,StartTempC,MaxTempC\n"
+        // Now 14 columns
+        const val CSV_HEADER = "Model,Delegate,Threads,TotalInferences,AvgLatencyMs,MedianLatencyMs,MaxLatencyMs,OsInterferences,PeakMemKb,BatteryPctStart,BatteryPctEnd,StartTempC,MaxTempC,BatteryHealth\n"
     }
 
     fun appendSummary(
@@ -27,6 +28,7 @@ class MetricsExporter(private val context: Context) {
         endBattery: Int,
         startTempC: Double,
         maxTempC: Double,
+        batteryHealth: String, // Added this parameter
         filename: String = "benchmark_results.csv"
     ) {
         val dir = context.getExternalFilesDir(null) ?: return
@@ -41,10 +43,10 @@ class MetricsExporter(private val context: Context) {
 
                 val row = String.format(
                     Locale.US,
-                    "%s,%s,%d,%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%.1f,%.1f\n",
+                    "%s,%s,%d,%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%.1f,%.1f,%s\n",
                     modelName, delegate, threads, totalInferences,
                     avgLatencyMs, medianLatencyMs, maxLatencyMs, osInterferences,
-                    peakMemKb, startBattery, endBattery, startTempC, maxTempC
+                    peakMemKb, startBattery, endBattery, startTempC, maxTempC, batteryHealth
                 )
                 writer.append(row)
             }
