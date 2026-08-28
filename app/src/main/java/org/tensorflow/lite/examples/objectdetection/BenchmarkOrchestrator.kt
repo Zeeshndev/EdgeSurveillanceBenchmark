@@ -26,39 +26,70 @@ class BenchmarkOrchestrator(
     fun runBenchmark(config: BenchmarkConfig) {
         benchmarkExecutor.execute {
             try {
-                // 1. The Physical Gatekeeper
                 if (!checkPhysicalGates()) {
                     Log.e("Orchestrator", "Physical gates failed. Aborting run.")
                     return@execute
                 }
+                
+                // Fetch Battery Health at the absolute start of the trial
+                val batteryHealth = getBatteryHealth()
+                if (batteryHealth != "GOOD") {
+                    Log.e("Orchestrator", "FATAL: Battery health is $batteryHealth. Aborting to prevent data contamination.")
+                    return@execute
+                }
+
                 Log.i("Orchestrator", "Gates passed. Starting controlled test for ${config.modelName}...")
 
-                // 2. Initialize Dependencies
                 val datasetFeeder = DatasetFeeder(context)
                 val telemetryCollector = TelemetryCollector(context)
                 val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
 
-                // 2.5 Acquire Programmatic OS WakeLock (Belt & Suspenders)
                 val wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "BenchmarkApp::InferenceLock")
-                wakeLock.acquire(40 * 60 * 1000L) // Force awake for up to 40 mins
+                wakeLock.acquire(40 * 60 * 1000L) 
 
                 val samples = mutableListOf<TelemetryCollector.Sample>()
                 val latenciesMs = mutableListOf<Double>()
 
-                // 3. Start 1Hz Telemetry Loop
                 telemetryExecutor.scheduleAtFixedRate({
                     samples.add(telemetryCollector.sampleOnce(powerManager))
                 }, 0, 1, TimeUnit.SECONDS)
 
-                // 4. Warmup Phase (10 frames)
-                for (i in 0 until 10) {
-                    val bitmap = datasetFeeder.getNextFrame()
-                    detectorHelper.detect(bitmap, 0)
-                }
+                // --- Claude's Dynamic Warmup Convergence ---
+                Log.i("Orchestrator", "Starting dynamic warmup...")
+                val warmupLatencies = mutableListOf<Double>()
+                val maxWarmup = 50
+                var convergedAt = maxWarmup
 
-                // 5. Wall-Clock Benchmark Loop 
-                // Set to 10 minutes for validation run. (Change to 30 * 60 * 1000L for full trials)
-                val durationMs = 10 * 60 * 1000L
+                for (i in 0 until maxWarmup) {
+                    val bitmap = datasetFeeder.getNextFrame()
+                    val t0 = SystemClock.elapsedRealtimeNanos()
+                    detectorHelper.detect(bitmap, 0)
+                    val t1 = SystemClock.elapsedRealtimeNanos()
+                    
+                    warmupLatencies.add((t1 - t0) / 1_000_000.0)
+
+                    // Check convergence every 5 iterations after a floor of 10
+                    if (i >= 10 && i % 5 == 0) {
+                        val recent = warmupLatencies.takeLast(5)
+                        val maxLat = recent.maxOrNull() ?: 0.0
+                        val minLat = recent.minOrNull() ?: 0.0
+                        val avgLat = recent.average()
+                        val cv = (maxLat - minLat) / avgLat
+                        
+                        if (cv < 0.05) { 
+                            convergedAt = i + 1
+                            Log.i("Warmup", "Converged after $convergedAt iterations. CV: $cv")
+                            break
+                        }
+                    }
+                }
+                if (convergedAt == maxWarmup) {
+                    Log.w("Warmup", "Did NOT converge within $maxWarmup iterations. Latencies: $warmupLatencies")
+                }
+                // -------------------------------------------
+
+                // Set to 30 * 60 * 1000L for the real Phase 1 matrix
+                val durationMs = 30 * 60 * 1000L
                 val startTime = System.currentTimeMillis()
                 val endTime = startTime + durationMs
 
@@ -80,19 +111,28 @@ class BenchmarkOrchestrator(
                     }
                 }
 
-                // 6. Stop Telemetry & Release WakeLock
                 telemetryExecutor.shutdown()
-                if (wakeLock.isHeld) {
-                    wakeLock.release()
-                }
+                if (wakeLock.isHeld) wakeLock.release()
 
-                // 7. Export the 3 CSV Files
-                exportData(config, latenciesMs, samples, maxLatencyMs)
+                exportData(config, latenciesMs, samples, maxLatencyMs, batteryHealth)
                 Log.i("Orchestrator", "Benchmark complete. All data exported.")
 
             } catch (e: Exception) {
                 Log.e("Orchestrator", "Crash during benchmark", e)
             }
+        }
+    }
+
+    private fun getBatteryHealth(): String {
+        val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        return when (intent?.getIntExtra(BatteryManager.EXTRA_HEALTH, -1)) {
+            BatteryManager.BATTERY_HEALTH_GOOD -> "GOOD"
+            BatteryManager.BATTERY_HEALTH_OVERHEAT -> "OVERHEAT"
+            BatteryManager.BATTERY_HEALTH_DEAD -> "DEAD"
+            BatteryManager.BATTERY_HEALTH_OVER_VOLTAGE -> "OVER_VOLTAGE"
+            BatteryManager.BATTERY_HEALTH_UNSPECIFIED_FAILURE -> "UNSPECIFIED_FAILURE"
+            BatteryManager.BATTERY_HEALTH_COLD -> "COLD"
+            else -> "UNKNOWN"
         }
     }
 
@@ -122,12 +162,12 @@ class BenchmarkOrchestrator(
         config: BenchmarkConfig,
         latenciesMs: List<Double>,
         samples: List<TelemetryCollector.Sample>,
-        maxLatencyMs: Double
+        maxLatencyMs: Double,
+        batteryHealth: String
     ) {
         val dir = context.getExternalFilesDir(null) ?: return
         val sanitizedName = config.modelName.replace(".tflite", "")
 
-        // CSV 1: Raw Latency Array
         val latencyFile = File(dir, "trial_${sanitizedName}_raw_latencies.csv")
         FileWriter(latencyFile).use { writer ->
             writer.append("InferenceIndex,LatencyMs\n")
@@ -136,7 +176,6 @@ class BenchmarkOrchestrator(
             }
         }
 
-        // CSV 2: Continuous Telemetry Curve
         val telemetryFile = File(dir, "trial_${sanitizedName}_telemetry.csv")
         FileWriter(telemetryFile).use { writer ->
             writer.append("TimestampMs,PssKb,RawCurrentUa,BatteryPct,TemperatureC,ThermalStatus\n")
@@ -145,19 +184,12 @@ class BenchmarkOrchestrator(
                     String.format(
                         Locale.US,
                         "%d,%d,%d,%d,%.1f,%d\n",
-                        s.timestampMs,
-                        s.pssKb,
-                        s.rawCurrentUa,
-                        s.batteryPct,
-                        s.temperatureC,
-                        s.thermalStatus
+                        s.timestampMs, s.pssKb, s.rawCurrentUa, s.batteryPct, s.temperatureC, s.thermalStatus
                     )
                 )
             }
         }
 
-        // CSV 3: Unified 13-Column Master Rollup Sheet
-        // Filter OS Interferences (Any latency > 500ms is an OS artifact, not AI compute)
         val cleanLatencies = latenciesMs.filter { it <= 500.0 }
         val osInterferences = latenciesMs.count { it > 500.0 }
         
@@ -181,7 +213,7 @@ class BenchmarkOrchestrator(
         metricsExporter.appendSummary(
             modelName = config.modelName,
             delegate = config.delegate,
-            threads = 4,
+            threads = config.numThreads,
             totalInferences = latenciesMs.size,
             avgLatencyMs = avgLatency,
             medianLatencyMs = medianLatency,
@@ -191,7 +223,8 @@ class BenchmarkOrchestrator(
             startBattery = startBat,
             endBattery = endBat,
             startTempC = startTemp,
-            maxTempC = maxTemp
+            maxTempC = maxTemp,
+            batteryHealth = batteryHealth
         )
     }
 }
