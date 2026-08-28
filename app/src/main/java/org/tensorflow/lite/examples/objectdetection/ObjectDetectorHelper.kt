@@ -37,8 +37,6 @@ class ObjectDetectorHelper(
   val objectDetectorListener: DetectorListener?
 ) {
 
-    // For this example this needs to be a var so it can be reset on changes. If the ObjectDetector
-    // will not change, a lazy val would be preferable.
     private var objectDetector: ObjectDetector? = null
 
     init {
@@ -49,46 +47,52 @@ class ObjectDetectorHelper(
         objectDetector = null
     }
 
-    // Initialize the object detector using current settings on the
-    // thread that is using it. CPU and NNAPI delegates can be used with detectors
-    // that are created on the main thread and used on a background thread, but
-    // the GPU delegate needs to be used on the thread that initialized the detector
     fun setupObjectDetector() {
-        // Create the base options for the detector using specifies max results and score threshold
         val optionsBuilder =
             ObjectDetector.ObjectDetectorOptions.builder()
                 .setScoreThreshold(threshold)
                 .setMaxResults(maxResults)
 
-        // Set general detection options, including number of used threads
         val baseOptionsBuilder = BaseOptions.builder().setNumThreads(numThreads)
 
-        // Use the specified hardware for running the model. Default to CPU
+        // Delegate Execution - Fail Loud Implementation
         when (currentDelegate) {
             DELEGATE_CPU -> {
-                // Default
+                // Default: Num threads already set above
             }
             DELEGATE_GPU -> {
-                if (CompatibilityList().isDelegateSupportedOnThisDevice) {
+                val compatList = CompatibilityList()
+                if (!compatList.isDelegateSupportedOnThisDevice) {
+                    Log.e("DelegateSetup", "ABORT: GPU delegate unsupported on this device.")
+                    throw IllegalStateException("GPU_DELEGATE_UNSUPPORTED")
+                }
+                try {
                     baseOptionsBuilder.useGpu()
-                } else {
-                    objectDetectorListener?.onError("GPU is not supported on this device")
+                } catch (e: Exception) {
+                    Log.e("DelegateSetup", "ABORT: GPU delegate construction failed.")
+                    throw e
                 }
             }
             DELEGATE_NNAPI -> {
-                baseOptionsBuilder.useNnapi()
+                try {
+                    baseOptionsBuilder.useNnapi()
+                } catch (e: Exception) {
+                    Log.e("DelegateSetup", "ABORT: NNAPI delegate construction failed.")
+                    throw e
+                }
             }
         }
 
         optionsBuilder.setBaseOptions(baseOptionsBuilder.build())
 
+        // Ensure YOLO models are correctly mapped or serve as the fallback
         val modelName =
             when (currentModel) {
                 MODEL_MOBILENETV1 -> "mobilenetv1.tflite"
                 MODEL_EFFICIENTDETV0 -> "efficientdet-lite0.tflite"
                 MODEL_EFFICIENTDETV1 -> "efficientdet-lite1.tflite"
                 MODEL_EFFICIENTDETV2 -> "efficientdet-lite2.tflite"
-                else -> "mobilenetv1.tflite"
+                else -> "yolo11n.tflite" 
             }
 
         try {
@@ -107,19 +111,13 @@ class ObjectDetectorHelper(
             setupObjectDetector()
         }
 
-        // Inference time is the difference between the system time at the start and finish of the
-        // process
         var inferenceTime = SystemClock.uptimeMillis()
 
-        // Create preprocessor for the image.
-        // See https://www.tensorflow.org/lite/inference_with_metadata/
-        //            lite_support#imageprocessor_architecture
         val imageProcessor =
             ImageProcessor.Builder()
                 .add(Rot90Op(-imageRotation / 90))
                 .build()
 
-        // Preprocess the image and convert it into a TensorImage for detection.
         val tensorImage = imageProcessor.process(TensorImage.fromBitmap(image))
 
         val results = objectDetector?.detect(tensorImage)
