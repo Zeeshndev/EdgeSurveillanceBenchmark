@@ -33,12 +33,12 @@ class BenchmarkOrchestrator(
                 
                 // Fetch Battery Health at the absolute start of the trial
                 val batteryHealth = getBatteryHealth()
-                if (batteryHealth != "GOOD" && batteryHealth != "UNKNOWN") {
+                if (batteryHealth != "GOOD" && !batteryHealth.startsWith("UNKNOWN")) {
                     Log.e("Orchestrator", "FATAL: Battery health is $batteryHealth. Aborting to prevent data contamination.")
                     return@execute
                 }
-                if (batteryHealth == "UNKNOWN") {
-                    Log.w("Orchestrator", "WARNING: Battery health is UNKNOWN (OS does not support API). Proceeding anyway.")
+                if (batteryHealth.startsWith("UNKNOWN")) {
+                    Log.w("Orchestrator", "WARNING: Battery health is $batteryHealth. Proceeding anyway.")
                 }
 
                 Log.i("Orchestrator", "Gates passed. Starting controlled test for ${config.modelName}...")
