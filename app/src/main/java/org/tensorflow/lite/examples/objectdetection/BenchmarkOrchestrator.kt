@@ -128,14 +128,15 @@ class BenchmarkOrchestrator(
 
     private fun getBatteryHealth(): String {
         val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        return when (intent?.getIntExtra(BatteryManager.EXTRA_HEALTH, -1)) {
+        val rawHealth = intent?.getIntExtra(BatteryManager.EXTRA_HEALTH, -1) ?: -1
+        return when (rawHealth) {
             BatteryManager.BATTERY_HEALTH_GOOD -> "GOOD"
             BatteryManager.BATTERY_HEALTH_OVERHEAT -> "OVERHEAT"
             BatteryManager.BATTERY_HEALTH_DEAD -> "DEAD"
             BatteryManager.BATTERY_HEALTH_OVER_VOLTAGE -> "OVER_VOLTAGE"
             BatteryManager.BATTERY_HEALTH_UNSPECIFIED_FAILURE -> "UNSPECIFIED_FAILURE"
             BatteryManager.BATTERY_HEALTH_COLD -> "COLD"
-            else -> "UNKNOWN"
+            else -> "UNKNOWN_$rawHealth" // Appends the raw integer for OEM mapping
         }
     }
 
@@ -168,10 +169,20 @@ class BenchmarkOrchestrator(
         maxLatencyMs: Double,
         batteryHealth: String
     ) {
-        val dir = context.getExternalFilesDir(null) ?: return
+        val rootDir = context.getExternalFilesDir(null) ?: return
         val sanitizedName = config.modelName.replace(".tflite", "")
 
-        val latencyFile = File(dir, "trial_${sanitizedName}_raw_latencies.csv")
+        // Auto-increment trial directory structure
+        var trialNum = 1
+        var trialDir = File(rootDir, "trial_data/${sanitizedName}_${config.delegate}_trial$trialNum")
+        while (trialDir.exists()) {
+            trialNum++
+            trialDir = File(rootDir, "trial_data/${sanitizedName}_${config.delegate}_trial$trialNum")
+        }
+        trialDir.mkdirs()
+
+        // CSV 1: Raw Latency Array inside Trial Dir
+        val latencyFile = File(trialDir, "raw_latencies.csv")
         FileWriter(latencyFile).use { writer ->
             writer.append("InferenceIndex,LatencyMs\n")
             latenciesMs.forEachIndexed { index, ms ->
@@ -179,7 +190,8 @@ class BenchmarkOrchestrator(
             }
         }
 
-        val telemetryFile = File(dir, "trial_${sanitizedName}_telemetry.csv")
+        // CSV 2: Continuous Telemetry Curve inside Trial Dir
+        val telemetryFile = File(trialDir, "telemetry.csv")
         FileWriter(telemetryFile).use { writer ->
             writer.append("TimestampMs,PssKb,RawCurrentUa,BatteryPct,TemperatureC,ThermalStatus\n")
             samples.forEach { s ->
@@ -209,25 +221,25 @@ class BenchmarkOrchestrator(
         val peakMem = samples.maxByOrNull { it.pssKb }?.pssKb ?: 0
         val startBat = samples.firstOrNull()?.batteryPct ?: 0
         val endBat = samples.lastOrNull()?.batteryPct ?: 0
-        
         val startTemp = samples.firstOrNull()?.temperatureC ?: 0.0
         val maxTemp = samples.maxByOrNull { it.temperatureC }?.temperatureC ?: 0.0
 
+        // Write to Master Rollup in Root
         metricsExporter.appendSummary(
-            modelName = config.modelName,
-            delegate = config.delegate,
-            threads = config.numThreads,
-            totalInferences = latenciesMs.size,
-            avgLatencyMs = avgLatency,
-            medianLatencyMs = medianLatency,
-            maxLatencyMs = maxLatencyMs,
-            osInterferences = osInterferences,
-            peakMemKb = peakMem,
-            startBattery = startBat,
-            endBattery = endBat,
-            startTempC = startTemp,
-            maxTempC = maxTemp,
-            batteryHealth = batteryHealth
+            modelName = config.modelName, delegate = config.delegate, threads = config.numThreads,
+            totalInferences = latenciesMs.size, avgLatencyMs = avgLatency, medianLatencyMs = medianLatency,
+            maxLatencyMs = maxLatencyMs, osInterferences = osInterferences, peakMemKb = peakMem,
+            startBattery = startBat, endBattery = endBat, startTempC = startTemp, maxTempC = maxTemp,
+            batteryHealth = batteryHealth, filename = "master_benchmark_results.csv"
+        )
+        
+        // Save isolated copy of summary row in Trial Dir
+        metricsExporter.appendSummary(
+            modelName = config.modelName, delegate = config.delegate, threads = config.numThreads,
+            totalInferences = latenciesMs.size, avgLatencyMs = avgLatency, medianLatencyMs = medianLatency,
+            maxLatencyMs = maxLatencyMs, osInterferences = osInterferences, peakMemKb = peakMem,
+            startBattery = startBat, endBattery = endBat, startTempC = startTemp, maxTempC = maxTemp,
+            batteryHealth = batteryHealth, filename = "trial_data/${sanitizedName}_${config.delegate}_trial$trialNum/summary.csv"
         )
     }
 }
