@@ -1,2 +1,4 @@
 Model,Delegate,Threads,Warmup,Inference,AvgLatencyMs,PeakMemKb,BatteryMicroAmps,ThermalThrottling,Crash,Error
 efficientdet-lite0.tflite,GPU,4,10,100,286.03,0,0,false,false,None
+yolo11n.tflite,1196,49.73,148992,98,98
+yolo11n.tflite,CPU,4,12283,48.84,48.99,90.50,0,217406,88,86,35.4,36.2
