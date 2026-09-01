@@ -8,8 +8,10 @@ import android.os.BatteryManager
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
+import java.io.BufferedReader
 import java.io.File
 import java.io.FileWriter
+import java.io.InputStreamReader
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -31,14 +33,10 @@ class BenchmarkOrchestrator(
                     return@execute
                 }
                 
-                // Fetch Battery Health at the absolute start of the trial
                 val batteryHealth = getBatteryHealth()
                 if (batteryHealth != "GOOD" && !batteryHealth.startsWith("UNKNOWN")) {
                     Log.e("Orchestrator", "FATAL: Battery health is $batteryHealth. Aborting to prevent data contamination.")
                     return@execute
-                }
-                if (batteryHealth.startsWith("UNKNOWN")) {
-                    Log.w("Orchestrator", "WARNING: Battery health is $batteryHealth. Proceeding anyway.")
                 }
 
                 Log.i("Orchestrator", "Gates passed. Starting controlled test for ${config.modelName}...")
@@ -57,7 +55,10 @@ class BenchmarkOrchestrator(
                     samples.add(telemetryCollector.sampleOnce(powerManager))
                 }, 0, 1, TimeUnit.SECONDS)
 
-                // --- Claude's Dynamic Warmup Convergence ---
+                Log.i("Orchestrator", "Received UI Config -> Delegate: '${config.delegate}'")
+                detectorHelper.currentDelegate = if (config.delegate.equals("GPU", ignoreCase = true)) ObjectDetectorHelper.DELEGATE_GPU else ObjectDetectorHelper.DELEGATE_CPU
+                detectorHelper.setupObjectDetector()
+
                 Log.i("Orchestrator", "Starting dynamic warmup...")
                 val warmupLatencies = mutableListOf<Double>()
                 val maxWarmup = 50
@@ -71,27 +72,32 @@ class BenchmarkOrchestrator(
                     
                     warmupLatencies.add((t1 - t0) / 1_000_000.0)
 
-                    // Check convergence every 5 iterations after a floor of 10
                     if (i >= 10 && i % 5 == 0) {
                         val recent = warmupLatencies.takeLast(5)
-                        val maxLat = recent.maxOrNull() ?: 0.0
-                        val minLat = recent.minOrNull() ?: 0.0
-                        val avgLat = recent.average()
-                        val cv = (maxLat - minLat) / avgLat
-                        
+                        val cv = (recent.maxOrNull()!! - recent.minOrNull()!!) / recent.average()
                         if (cv < 0.05) { 
                             convergedAt = i + 1
-                            Log.i("Warmup", "Converged after $convergedAt iterations. CV: $cv")
                             break
                         }
                     }
                 }
-                if (convergedAt == maxWarmup) {
-                    Log.w("Warmup", "Did NOT converge within $maxWarmup iterations. Latencies: $warmupLatencies")
-                }
-                // -------------------------------------------
 
-                // Set to 30 * 60 * 1000L for the real Phase 1 matrix
+                // --- Claude's Automated Kernel & Backend Gate ---
+                var finalDelegateName = config.delegate
+                if (config.delegate.equals("GPU", ignoreCase = true)) {
+                    val (isValid, backend) = validateGpuState()
+                    if (!isValid) {
+                        Log.e("Orchestrator", "FATAL: GPU requested but 0 kernels created (Silent CPU Fallback). Aborting trial.")
+                        telemetryExecutor.shutdown()
+                        if (wakeLock.isHeld) wakeLock.release()
+                        return@execute
+                    }
+                    // Dynamically append the backend (e.g., "GPU (OpenGL)") so the CSV logger captures it
+                    finalDelegateName = "GPU ($backend)"
+                    Log.i("Orchestrator", "GPU Verification Passed. Proceeding with backend: $finalDelegateName")
+                }
+                // ------------------------------------------------
+
                 val durationMs = 30 * 60 * 1000L
                 val startTime = System.currentTimeMillis()
                 val endTime = startTime + durationMs
@@ -117,12 +123,38 @@ class BenchmarkOrchestrator(
                 telemetryExecutor.shutdown()
                 if (wakeLock.isHeld) wakeLock.release()
 
-                exportData(config, latenciesMs, samples, maxLatencyMs, batteryHealth)
+                // Pass the dynamically updated delegate name to the exporter
+                exportData(config.modelName, finalDelegateName, config.numThreads, latenciesMs, samples, maxLatencyMs, batteryHealth)
                 Log.i("Orchestrator", "Benchmark complete. All data exported.")
 
             } catch (e: Exception) {
                 Log.e("Orchestrator", "Crash during benchmark", e)
             }
+        }
+    }
+
+    private fun validateGpuState(): Pair<Boolean, String> {
+        try {
+            // Scrape the app's own logcat buffer for native C++ hardware flags
+            val process = Runtime.getRuntime().exec("logcat -d -t 1500 --pid=${android.os.Process.myPid()}")
+            val reader = BufferedReader(InputStreamReader(process.inputStream))
+            
+            var backend = "Unknown"
+            var kernelCount = -1
+            
+            reader.forEachLine { line ->
+                if (line.contains("Falling back to OpenGL")) backend = "OpenGL"
+                else if (line.contains("OpenCL library on this device")) backend = "OpenCL (Failed)"
+                else if (line.contains("Created") && line.contains("GPU delegate kernels")) {
+                    val match = Regex("Created (\\d+) GPU").find(line)
+                    if (match != null) kernelCount = match.groupValues[1].toInt()
+                }
+            }
+            
+            if (kernelCount == 0) return Pair(false, backend)
+            return Pair(true, backend)
+        } catch (e: Exception) {
+            return Pair(true, "ErrorParsingLogcat")
         }
     }
 
@@ -136,7 +168,7 @@ class BenchmarkOrchestrator(
             BatteryManager.BATTERY_HEALTH_OVER_VOLTAGE -> "OVER_VOLTAGE"
             BatteryManager.BATTERY_HEALTH_UNSPECIFIED_FAILURE -> "UNSPECIFIED_FAILURE"
             BatteryManager.BATTERY_HEALTH_COLD -> "COLD"
-            else -> "UNKNOWN_$rawHealth" // Appends the raw integer for OEM mapping
+            else -> "UNKNOWN_$rawHealth" 
         }
     }
 
@@ -146,7 +178,6 @@ class BenchmarkOrchestrator(
         }
         val status: Int = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
         val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
-
         val level: Int = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale: Int = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
         val batteryPct = level * 100 / scale.toFloat()
@@ -163,25 +194,25 @@ class BenchmarkOrchestrator(
     }
 
     private fun exportData(
-        config: BenchmarkConfig,
+        modelName: String,
+        delegateName: String,
+        numThreads: Int,
         latenciesMs: List<Double>,
         samples: List<TelemetryCollector.Sample>,
         maxLatencyMs: Double,
         batteryHealth: String
     ) {
         val rootDir = context.getExternalFilesDir(null) ?: return
-        val sanitizedName = config.modelName.replace(".tflite", "")
+        val sanitizedName = modelName.replace(".tflite", "")
 
-        // Auto-increment trial directory structure
         var trialNum = 1
-        var trialDir = File(rootDir, "trial_data/${sanitizedName}_${config.delegate}_trial$trialNum")
+        var trialDir = File(rootDir, "trial_data/${sanitizedName}_${delegateName.replace(" ", "")}_trial$trialNum")
         while (trialDir.exists()) {
             trialNum++
-            trialDir = File(rootDir, "trial_data/${sanitizedName}_${config.delegate}_trial$trialNum")
+            trialDir = File(rootDir, "trial_data/${sanitizedName}_${delegateName.replace(" ", "")}_trial$trialNum")
         }
         trialDir.mkdirs()
 
-        // CSV 1: Raw Latency Array inside Trial Dir
         val latencyFile = File(trialDir, "raw_latencies.csv")
         FileWriter(latencyFile).use { writer ->
             writer.append("InferenceIndex,LatencyMs\n")
@@ -190,7 +221,6 @@ class BenchmarkOrchestrator(
             }
         }
 
-        // CSV 2: Continuous Telemetry Curve inside Trial Dir
         val telemetryFile = File(trialDir, "telemetry.csv")
         FileWriter(telemetryFile).use { writer ->
             writer.append("TimestampMs,PssKb,RawCurrentUa,BatteryPct,TemperatureC,ThermalStatus\n")
@@ -207,15 +237,10 @@ class BenchmarkOrchestrator(
 
         val cleanLatencies = latenciesMs.filter { it <= 500.0 }
         val osInterferences = latenciesMs.count { it > 500.0 }
-        
         val avgLatency = if (cleanLatencies.isNotEmpty()) cleanLatencies.average() else 0.0
         val medianLatency = if (cleanLatencies.isNotEmpty()) {
             val sorted = cleanLatencies.sorted()
-            if (sorted.size % 2 == 0) {
-                (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) / 2.0
-            } else {
-                sorted[sorted.size / 2]
-            }
+            if (sorted.size % 2 == 0) (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) / 2.0 else sorted[sorted.size / 2]
         } else 0.0
 
         val peakMem = samples.maxByOrNull { it.pssKb }?.pssKb ?: 0
@@ -224,22 +249,20 @@ class BenchmarkOrchestrator(
         val startTemp = samples.firstOrNull()?.temperatureC ?: 0.0
         val maxTemp = samples.maxByOrNull { it.temperatureC }?.temperatureC ?: 0.0
 
-        // Write to Master Rollup in Root
         metricsExporter.appendSummary(
-            modelName = config.modelName, delegate = config.delegate, threads = config.numThreads,
+            modelName = modelName, delegate = delegateName, threads = numThreads,
             totalInferences = latenciesMs.size, avgLatencyMs = avgLatency, medianLatencyMs = medianLatency,
             maxLatencyMs = maxLatencyMs, osInterferences = osInterferences, peakMemKb = peakMem,
             startBattery = startBat, endBattery = endBat, startTempC = startTemp, maxTempC = maxTemp,
             batteryHealth = batteryHealth, filename = "master_benchmark_results.csv"
         )
         
-        // Save isolated copy of summary row in Trial Dir
         metricsExporter.appendSummary(
-            modelName = config.modelName, delegate = config.delegate, threads = config.numThreads,
+            modelName = modelName, delegate = delegateName, threads = numThreads,
             totalInferences = latenciesMs.size, avgLatencyMs = avgLatency, medianLatencyMs = medianLatency,
             maxLatencyMs = maxLatencyMs, osInterferences = osInterferences, peakMemKb = peakMem,
             startBattery = startBat, endBattery = endBat, startTempC = startTemp, maxTempC = maxTemp,
-            batteryHealth = batteryHealth, filename = "trial_data/${sanitizedName}_${config.delegate}_trial$trialNum/summary.csv"
+            batteryHealth = batteryHealth, filename = "trial_data/${sanitizedName}_${delegateName.replace(" ", "")}_trial$trialNum/summary.csv"
         )
     }
 }
