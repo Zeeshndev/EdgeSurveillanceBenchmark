@@ -101,13 +101,18 @@ class CameraFragment : Fragment(), ObjectDetectorHelper.DetectorListener {
         )
 
         // Listen for the benchmark button click
+        // Listen for the benchmark button click
         fragmentCameraBinding.btnRunBenchmark.setOnClickListener {
             // SHUT OFF THE LIVE CAMERA TO PREVENT CRASHES
             cameraProvider?.unbindAll()
 
+            // 1. Dynamically read the actual delegate selected in the UI dropdown
+            val uiDelegate = fragmentCameraBinding.bottomSheetLayout.spinnerDelegate.selectedItem.toString()
+            
+            // 2. Hardcode the YOLO model directly, ignoring the UI model dropdown
             val config = org.tensorflow.lite.examples.objectdetection.BenchmarkConfig(
-                modelName = "yolo11n.tflite",
-                delegate = "CPU"
+                modelName = "yolo11n.tflite", // Make sure this matches your exact asset file name!
+                delegate = uiDelegate
             )
 
             val orchestrator = org.tensorflow.lite.examples.objectdetection.BenchmarkOrchestrator(
