@@ -235,13 +235,11 @@ class BenchmarkOrchestrator(
             }
         }
 
-        val cleanLatencies = latenciesMs.filter { it <= 500.0 }
-        val osInterferences = latenciesMs.count { it > 500.0 }
-        val avgLatency = if (cleanLatencies.isNotEmpty()) cleanLatencies.average() else 0.0
-        val medianLatency = if (cleanLatencies.isNotEmpty()) {
-            val sorted = cleanLatencies.sorted()
-            if (sorted.size % 2 == 0) (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) / 2.0 else sorted[sorted.size / 2]
-        } else 0.0
+        // --- Refactored math logic utilizing the centralized LatencyMath suite ---
+        val avgLatency = LatencyMath.calculateAverage(latenciesMs)
+        val medianLatency = LatencyMath.calculateMedian(latenciesMs)
+        val osInterferences = LatencyMath.countOSInterferences(latenciesMs)
+        // -------------------------------------------------------------------------
 
         val peakMem = samples.maxByOrNull { it.pssKb }?.pssKb ?: 0
         val startBat = samples.firstOrNull()?.batteryPct ?: 0

@@ -10,8 +10,8 @@ import java.util.Locale
 class MetricsExporter(private val context: Context) {
 
     companion object {
-        // Now 14 columns
-        const val CSV_HEADER = "Model,Delegate,Threads,TotalInferences,AvgLatencyMs,MedianLatencyMs,MaxLatencyMs,OsInterferences,PeakMemKb,BatteryPctStart,BatteryPctEnd,StartTempC,MaxTempC,BatteryHealth\n"
+        // Strict 14-column schema matching README and RegressionTestSuite
+        const val CSV_HEADER = "ModelName,Delegate,Threads,TotalInferences,AvgLatencyMs,MedianLatencyMs,MaxLatencyMs,OSInterferences,PeakMemKb,StartBattery,EndBattery,StartTempC,MaxTempC,BatteryHealth"
     }
 
     fun appendSummary(
@@ -28,8 +28,8 @@ class MetricsExporter(private val context: Context) {
         endBattery: Int,
         startTempC: Double,
         maxTempC: Double,
-        batteryHealth: String, // Added this parameter
-        filename: String = "benchmark_results.csv"
+        batteryHealth: String,
+        filename: String = "master_benchmark_results.csv" // Updated to match README
     ) {
         val dir = context.getExternalFilesDir(null) ?: return
         val file = File(dir, filename)
@@ -38,7 +38,7 @@ class MetricsExporter(private val context: Context) {
         try {
             FileWriter(file, true).use { writer ->
                 if (isNewFile) {
-                    writer.append(CSV_HEADER)
+                    writer.append(CSV_HEADER + "\n") // Newline appended here
                 }
 
                 val row = String.format(

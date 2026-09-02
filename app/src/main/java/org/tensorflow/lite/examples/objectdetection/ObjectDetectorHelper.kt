@@ -58,18 +58,21 @@ class ObjectDetectorHelper(
         // Delegate Execution - Fail Loud Implementation
         when (currentDelegate) {
             DELEGATE_CPU -> {
+                Log.i("TFLiteDelegate_PROOF", "Attempting to configure CPU delegate...")
                 // Default: Num threads already set above
             }
             DELEGATE_GPU -> {
                 val compatList = CompatibilityList()
                 if (!compatList.isDelegateSupportedOnThisDevice) {
-                    Log.e("DelegateSetup", "ABORT: GPU delegate unsupported on this device.")
+                    Log.e("TFLiteDelegate_PROOF", "ABORT: GPU delegate unsupported on this device.")
                     throw IllegalStateException("GPU_DELEGATE_UNSUPPORTED")
                 }
                 try {
+                    Log.i("TFLiteDelegate_PROOF", "Attempting to attach GPU delegate to BaseOptions...")
                     baseOptionsBuilder.useGpu()
+                    Log.i("TFLiteDelegate_PROOF", "GPU delegate attached successfully to BaseOptions.")
                 } catch (e: Exception) {
-                    Log.e("DelegateSetup", "ABORT: GPU delegate construction failed.")
+                    Log.e("TFLiteDelegate_PROOF", "ABORT: GPU delegate construction failed.")
                     throw e
                 }
             }
