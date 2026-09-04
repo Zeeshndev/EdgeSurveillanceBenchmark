@@ -57,6 +57,13 @@ class BenchmarkOrchestrator(
 
                 Log.i("Orchestrator", "Received UI Config -> Delegate: '${config.delegate}'")
                 detectorHelper.currentDelegate = if (config.delegate.equals("GPU", ignoreCase = true)) ObjectDetectorHelper.DELEGATE_GPU else ObjectDetectorHelper.DELEGATE_CPU
+
+                // --- RESEARCH OVERRIDE: Force strict thread counts ---
+                val forcedThreads = if (detectorHelper.currentDelegate == ObjectDetectorHelper.DELEGATE_CPU) 4 else 1
+                detectorHelper.numThreads = forcedThreads
+                Log.i("Orchestrator", "UI bypassed. Forcing threads to: $forcedThreads")
+                // -----------------------------------------------------
+
                 detectorHelper.setupObjectDetector()
 
                 Log.i("Orchestrator", "Starting dynamic warmup...")
@@ -82,7 +89,7 @@ class BenchmarkOrchestrator(
                     }
                 }
 
-                // --- Claude's Automated Kernel & Backend Gate ---
+                // --- Automated Kernel & Backend Gate ---
                 var finalDelegateName = config.delegate
                 if (config.delegate.equals("GPU", ignoreCase = true)) {
                     val (isValid, backend) = validateGpuState()
@@ -123,8 +130,8 @@ class BenchmarkOrchestrator(
                 telemetryExecutor.shutdown()
                 if (wakeLock.isHeld) wakeLock.release()
 
-                // Pass the dynamically updated delegate name to the exporter
-                exportData(config.modelName, finalDelegateName, config.numThreads, latenciesMs, samples, maxLatencyMs, batteryHealth)
+                // Pass the dynamically updated delegate name and forcedThreads to the exporter
+                exportData(config.modelName, finalDelegateName, forcedThreads, latenciesMs, samples, maxLatencyMs, batteryHealth)
                 Log.i("Orchestrator", "Benchmark complete. All data exported.")
 
             } catch (e: Exception) {
@@ -235,11 +242,9 @@ class BenchmarkOrchestrator(
             }
         }
 
-        // --- Refactored math logic utilizing the centralized LatencyMath suite ---
         val avgLatency = LatencyMath.calculateAverage(latenciesMs)
         val medianLatency = LatencyMath.calculateMedian(latenciesMs)
         val osInterferences = LatencyMath.countOSInterferences(latenciesMs)
-        // -------------------------------------------------------------------------
 
         val peakMem = samples.maxByOrNull { it.pssKb }?.pssKb ?: 0
         val startBat = samples.firstOrNull()?.batteryPct ?: 0
